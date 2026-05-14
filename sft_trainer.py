@@ -7,6 +7,7 @@ import optax
 import flax
 import orbax.checkpoint
 import psutil
+import gc
 from torch.utils.tensorboard import SummaryWriter
 from datasets import load_dataset
 from transformers import PreTrainedTokenizerFast, AutoTokenizer
@@ -110,7 +111,7 @@ def sft_loss_fn(params, apply_fn, batch):
 
     return loss
 
-@jax.jit
+@jax.jit(donate_argnums=(0,))
 def sft_train_step(state, batch):
     grad_fn = jax.value_and_grad(sft_loss_fn)
     loss, grads = grad_fn(state.params, state.apply_fn, batch)
@@ -208,7 +209,7 @@ def main(args_list=None):
 
     if num_devices > 1:
         state = flax.jax_utils.replicate(state)
-        p_train_step = jax.pmap(p_sft_train_step_fn, axis_name='batch')
+        p_train_step = jax.pmap(p_sft_train_step_fn, axis_name='batch', donate_argnums=(0,))
     else:
         p_train_step = sft_train_step
 
@@ -233,6 +234,9 @@ def main(args_list=None):
             continue
 
         global_state = flax.jax_utils.unreplicate(state) if num_devices > 1 else state
+
+        # Clear stale XLA arrays
+        gc.collect()
 
         if step % 10 == 0:
             current_lr = lr_schedule(step)

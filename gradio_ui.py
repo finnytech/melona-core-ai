@@ -1,9 +1,13 @@
+import os
+# Force XLA to reserve exactly 85% of VRAM for training on process startup, leaving 15% contiguous for UI/Chat buffer
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.85"
+
 import gradio as gr
 import threading
 import time
-import os
 import glob
 import jax
+import gc
 import jax.numpy as jnp
 from transformers import PreTrainedTokenizerFast, AutoTokenizer
 import numpy as np
@@ -94,6 +98,9 @@ def chat_inference(message, history, mode):
         prompt = f"Instruction: {message}\nInput: \nOutput: "
 
     try:
+        # Prevent memory fragmentation by forcing GC before allocating new chat buffers
+        gc.collect()
+
         # Load Tokenizer
         tokenizer_path = 'tokenizer.json'
         if os.path.exists(tokenizer_path):
