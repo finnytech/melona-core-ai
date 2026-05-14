@@ -1,0 +1,10 @@
+jax[tpu]
+flax
+optax
+transformers
+datasets
+tensorboard
+gradio
+safetensors
+torch
+orbax-checkpoint
