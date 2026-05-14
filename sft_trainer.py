@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import optax
 import flax
 import orbax.checkpoint
+import psutil
 from torch.utils.tensorboard import SummaryWriter
 from datasets import load_dataset
 from transformers import PreTrainedTokenizerFast, AutoTokenizer
@@ -124,6 +125,9 @@ def p_sft_train_step_fn(state, batch):
     state = state.apply_gradients(grads=grads)
     return state, loss
 
+# Global state for hot-reloading in the UI
+global_state = None
+
 def create_sft_train_state(rng, config, learning_rate_fn):
     model = LlamaForCausalLM(config)
     dummy_input = jnp.ones((1, config.max_position_embeddings), dtype=jnp.int32)
@@ -139,7 +143,9 @@ def create_sft_train_state(rng, config, learning_rate_fn):
         tx=tx,
     )
 
-def main():
+def main(args_list=None):
+    global global_state
+
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.85"
 
     parser = argparse.ArgumentParser()
@@ -151,7 +157,19 @@ def main():
     parser.add_argument('--warmup_steps', type=int, default=500)
     parser.add_argument('--peak_lr', type=float, default=2e-5) # lower for SFT
     parser.add_argument('--save_every', type=int, default=1000)
-    args = parser.parse_args()
+    args = parser.parse_args(args_list)
+
+    # Dynamic Batch Sizing based on available memory
+    try:
+        mem = psutil.virtual_memory()
+        if mem.available > 30 * 1024**3:
+            args.batch_size = max(args.batch_size, 16)
+        elif mem.available > 15 * 1024**3:
+            args.batch_size = max(args.batch_size, 8)
+        else:
+            args.batch_size = max(args.batch_size, 4)
+    except Exception as e:
+        print(f"Warning: Could not dynamically scale batch size: {e}")
 
     os.makedirs(args.output_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=os.path.join(args.output_dir, 'logs_sft'))
@@ -201,13 +219,20 @@ def main():
         if step >= args.max_steps:
             break
 
-        if num_devices > 1:
-            batch = {k: v.reshape((num_devices, args.batch_size) + v.shape[1:]) for k, v in batch.items()}
+        try:
+            if num_devices > 1:
+                batch = {k: v.reshape((num_devices, args.batch_size) + v.shape[1:]) for k, v in batch.items()}
 
-        state, loss = p_train_step(state, batch)
+            batch = jax.device_put(batch)
+            state, loss = p_train_step(state, batch)
 
-        if num_devices > 1:
-            loss = jnp.mean(loss)
+            if num_devices > 1:
+                loss = jnp.mean(loss)
+        except Exception as e:
+            print(f"SFT Training step failed. Error: {e}")
+            continue
+
+        global_state = flax.jax_utils.unreplicate(state) if num_devices > 1 else state
 
         if step % 10 == 0:
             current_lr = lr_schedule(step)
