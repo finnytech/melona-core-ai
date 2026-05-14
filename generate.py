@@ -45,9 +45,10 @@ def generate(model_apply_fn, params, input_ids, config, max_new_tokens=50, tempe
 
     return input_ids
 
-def main():
+def main(args_list=None):
     # Only use 5% of VRAM to avoid crashing the background training process
-    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.05"
+    if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
+        os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.05"
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint_dir', type=str, default='/content/drive/MyDrive/Omega_20M_Final/checkpoints')
@@ -56,7 +57,7 @@ def main():
     parser.add_argument('--max_new_tokens', type=int, default=50)
     parser.add_argument('--temperature', type=float, default=0.8)
     parser.add_argument('--top_k', type=int, default=50)
-    args = parser.parse_args()
+    args = parser.parse_args(args_list)
 
     # Load tokenizer
     if os.path.exists(args.tokenizer_path):
@@ -71,20 +72,24 @@ def main():
     dummy_lr = create_learning_rate_schedule(1, 1, 1.0)
     state = create_train_state(rng, config, dummy_lr)
 
-    # Restore weights
-    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=3, create=False)
-    checkpoint_manager = orbax.checkpoint.CheckpointManager(
-        args.checkpoint_dir, orbax_checkpointer, options
-    )
-
-    latest_step = checkpoint_manager.latest_step()
-    if latest_step is not None:
-        restored = checkpoint_manager.restore(latest_step)
-        state = state.replace(step=restored['step'], params=restored['params'])
-        print(f"Loaded checkpoint from step {state.step}")
+    # Restore weights (only if we're not hot-reloading from memory)
+    # Check if a global_state was passed via a hack or check checkpoints
+    # In this standalone script mode we check disk:
+    if os.path.exists(args.checkpoint_dir):
+        orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+        options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=3, create=False)
+        checkpoint_manager = orbax.checkpoint.CheckpointManager(
+            args.checkpoint_dir, orbax_checkpointer, options
+        )
+        latest_step = checkpoint_manager.latest_step()
+        if latest_step is not None:
+            restored = checkpoint_manager.restore(latest_step)
+            state = state.replace(step=restored['step'], params=restored['params'])
+            print(f"Loaded checkpoint from step {state.step}")
+        else:
+            print("Warning: No checkpoint found in directory, using random weights.")
     else:
-        print("Warning: No checkpoint found, using random weights.")
+        print("Warning: Checkpoint directory does not exist, using random weights.")
 
     # Encode prompt
     input_ids = tokenizer.encode(args.prompt, return_tensors="np")

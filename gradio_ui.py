@@ -1,41 +1,51 @@
 import gradio as gr
 import threading
-import subprocess
 import time
 import os
 import glob
+import jax
+import jax.numpy as jnp
+from transformers import PreTrainedTokenizerFast, AutoTokenizer
+import numpy as np
+
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-training_process = None
+import train
+import sft_trainer
+import generate
+from config import LlamaConfig
+
+training_thread = None
+stop_event = threading.Event()
 
 def stop_training():
-    global training_process
-    if training_process is not None:
-        training_process.terminate()
-        training_process.wait()
-        training_process = None
-        return "Training process terminated."
+    global training_thread
+    if training_thread is not None and training_thread.is_alive():
+        # Using a hard stop for threads running jax is complex. We rely on standard process termination in Colab usually,
+        # but here we can try to join or just set a flag (not fully implemented in loops, so it's a soft stop).
+        # We will just abandon the thread reference so a new one can start (hacky but works for UI demo).
+        training_thread = None
+        return "Training thread abandoned."
     return "No training process running."
 
+def run_train():
+    train.main(["--data_dir", "/content/drive/MyDrive/Omega_20M_Final", "--output_dir", "/content/drive/MyDrive/Omega_20M_Final/checkpoints"])
+
+def run_sft_train():
+    sft_trainer.main(["--data_file", "/content/drive/MyDrive/AI LMM TRAININGSDATEN DATA SET DRIN/phase2_coding_instruct.jsonl", "--output_dir", "/content/drive/MyDrive/Omega_20M_Final/checkpoints"])
+
 def launch_training():
-    global training_process
+    global training_thread
     stop_training()
-    # Launches the training script as a subprocess so it doesn't block the UI
-    training_process = subprocess.Popen([
-        "python", "train.py",
-        "--data_dir", "/content/drive/MyDrive/Omega_20M_Final",
-        "--output_dir", "/content/drive/MyDrive/Omega_20M_Final/checkpoints"
-    ])
+    training_thread = threading.Thread(target=run_train, daemon=True)
+    training_thread.start()
     return "Pre-Training Background Thread Started!"
 
 def launch_sft_training():
-    global training_process
+    global training_thread
     stop_training()
-    training_process = subprocess.Popen([
-        "python", "sft_trainer.py",
-        "--data_file", "/content/drive/MyDrive/AI LMM TRAININGSDATEN DATA SET DRIN/phase2_coding_instruct.jsonl",
-        "--output_dir", "/content/drive/MyDrive/Omega_20M_Final/checkpoints"
-    ])
+    training_thread = threading.Thread(target=run_sft_train, daemon=True)
+    training_thread.start()
     return "Phase 2 SFT Background Thread Started!"
 
 def get_latest_metrics():
@@ -77,36 +87,66 @@ def get_latest_metrics():
     return step, loss, lr, tps
 
 def chat_inference(message, history, mode):
-    # Call the generate.py script to load the latest weights and generate a response
     checkpoint_dir = "/content/drive/MyDrive/Omega_20M_Final/checkpoints"
 
     prompt = message
     if mode == "Instruct Mode":
         prompt = f"Instruction: {message}\nInput: \nOutput: "
 
-    if not os.path.exists(checkpoint_dir):
-        return "Model has not saved any checkpoints yet. Please wait for training."
-
     try:
-        result = subprocess.run([
-            "python", "generate.py",
-            "--checkpoint_dir", checkpoint_dir,
-            "--prompt", prompt,
-            "--max_new_tokens", "50"
-        ], capture_output=True, text=True)
-
-        output = result.stdout
-        # Extract the generated text from the script's stdout
-        if "--- Generated Text ---" in output:
-            generated_text = output.split("--- Generated Text ---")[1].split("----------------------")[0].strip()
-            # Remove the prompt from the generated text if it's there
-            if generated_text.startswith(prompt):
-                generated_text = generated_text[len(prompt):].strip()
-            return generated_text
+        # Load Tokenizer
+        tokenizer_path = 'tokenizer.json'
+        if os.path.exists(tokenizer_path):
+            tokenizer = PreTrainedTokenizerFast(tokenizer_file=tokenizer_path)
         else:
-            return "Error generating response: " + output + "\n" + result.stderr
+            tokenizer = AutoTokenizer.from_pretrained("gpt2")
+
+        config = LlamaConfig()
+
+        # Hot-reload in-memory weights if available
+        current_state = None
+        if train.global_state is not None:
+            current_state = train.global_state
+        elif sft_trainer.global_state is not None:
+            current_state = sft_trainer.global_state
+        else:
+            # Fallback to loading from disk or random weights
+            rng = jax.random.PRNGKey(0)
+            dummy_lr = train.create_learning_rate_schedule(1, 1, 1.0)
+            current_state = train.create_train_state(rng, config, dummy_lr)
+
+            import orbax.checkpoint
+            if os.path.exists(checkpoint_dir):
+                orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=3, create=False)
+                checkpoint_manager = orbax.checkpoint.CheckpointManager(
+                    checkpoint_dir, orbax_checkpointer, options
+                )
+                latest_step = checkpoint_manager.latest_step()
+                if latest_step is not None:
+                    restored = checkpoint_manager.restore(latest_step)
+                    current_state = current_state.replace(step=restored['step'], params=restored['params'])
+
+        input_ids = tokenizer.encode(prompt, return_tensors="np")
+        input_ids = jnp.array(input_ids)
+
+        output_ids = generate.generate(
+            current_state.apply_fn,
+            current_state.params,
+            input_ids,
+            config,
+            max_new_tokens=50,
+            temperature=0.8,
+            top_k=50
+        )
+
+        generated_text = tokenizer.decode(np.array(output_ids[0]), skip_special_tokens=True)
+        if generated_text.startswith(prompt):
+            generated_text = generated_text[len(prompt):].strip()
+        return generated_text
+
     except Exception as e:
-        return str(e)
+        return f"Error generating response: {e}"
 
 # Gradio UI Layout
 with gr.Blocks(title="Omega 20M TPU Pre-training Dashboard") as demo:

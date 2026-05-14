@@ -26,8 +26,9 @@ def get_dataloader(
         tokenizer = AutoTokenizer.from_pretrained("gpt2")
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Find all JSONL shards in the directory
-    data_files = glob.glob(os.path.join(data_dir, "*.jsonl"))
+    # Find all JSONL shards in the directory (recursively)
+    data_files = glob.glob(os.path.join(data_dir, "**/*.jsonl"), recursive=True)
+    data_files += glob.glob(os.path.join(data_dir, "**/*.processed.jsonl"), recursive=True)
     if not data_files:
         print(f"Warning: No .jsonl files found in {data_dir}. Using dummy data for pipeline.")
         # Fallback to a dummy HF dataset just so the pipeline doesn't crash during testing

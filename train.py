@@ -7,6 +7,7 @@ import optax
 import flax
 from flax.training import train_state
 import orbax.checkpoint
+import psutil
 from torch.utils.tensorboard import SummaryWriter
 
 from config import LlamaConfig
@@ -75,7 +76,12 @@ def p_train_step_fn(state, batch):
     state = state.apply_gradients(grads=grads)
     return state, loss
 
-def main():
+# Global state for hot-reloading in the UI
+global_state = None
+
+def main(args_list=None):
+    global global_state
+
     # Pre-allocate 85% of VRAM for training to leave room for inference
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.85"
 
@@ -88,7 +94,20 @@ def main():
     parser.add_argument('--warmup_steps', type=int, default=2000, help='Warmup steps')
     parser.add_argument('--peak_lr', type=float, default=3e-4, help='Peak learning rate')
     parser.add_argument('--save_every', type=int, default=2000, help='Save checkpoint every N steps')
-    args = parser.parse_args()
+    args = parser.parse_args(args_list)
+
+    # Dynamic Batch Sizing based on available memory
+    try:
+        mem = psutil.virtual_memory()
+        # Scale batch size roughly based on available RAM (this is a simplified heuristic)
+        if mem.available > 30 * 1024**3: # >30GB RAM
+            args.batch_size = max(args.batch_size, 16)
+        elif mem.available > 15 * 1024**3: # >15GB RAM
+            args.batch_size = max(args.batch_size, 8)
+        else:
+            args.batch_size = max(args.batch_size, 4)
+    except Exception as e:
+        print(f"Warning: Could not dynamically scale batch size: {e}")
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -156,14 +175,23 @@ def main():
                 break
 
             # If multi-device, reshape batch to (num_devices, batch_size_per_device, ...)
-            if num_devices > 1:
-                batch = {k: v.reshape((num_devices, args.batch_size) + v.shape[1:]) for k, v in batch.items()}
+            try:
+                if num_devices > 1:
+                    batch = {k: v.reshape((num_devices, args.batch_size) + v.shape[1:]) for k, v in batch.items()}
 
-            state, loss = p_train_step(state, batch)
+                # Use jax.device_put to force TPU execution and catch VRAM issues
+                batch = jax.device_put(batch)
+                state, loss = p_train_step(state, batch)
 
-            # If multi-device, average loss across devices
-            if num_devices > 1:
-                loss = jnp.mean(loss)
+                # If multi-device, average loss across devices
+                if num_devices > 1:
+                    loss = jnp.mean(loss)
+            except Exception as e:
+                print(f"Training step failed, possibly due to VRAM exhaustion. Skipping batch. Error: {e}")
+                continue
+
+            # Update global state for hot-reloading
+            global_state = flax.jax_utils.unreplicate(state) if num_devices > 1 else state
 
             # Logging
             tokens_in_batch = global_batch_size * config.max_position_embeddings
