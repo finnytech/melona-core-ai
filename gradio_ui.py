@@ -131,13 +131,9 @@ with gr.Blocks(title="Omega 20M TPU Pre-training Dashboard") as demo:
             stop_btn = gr.Button("Stop All Training", variant="stop")
             stop_btn.click(fn=stop_training, outputs=status_text)
 
-            # Auto-refresh metrics every 5 seconds
-            demo.load(
-                fn=get_latest_metrics,
-                inputs=None,
-                outputs=[step_text, loss_text, lr_text, tps_text],
-                every=5
-            )
+            # Auto-refresh metrics using gr.Timer
+            timer = gr.Timer(1)
+            timer.tick(fn=get_latest_metrics, outputs=[step_text, loss_text, lr_text, tps_text])
 
         with gr.Column(scale=2):
             gr.Markdown("## Live Evaluation Chat")
