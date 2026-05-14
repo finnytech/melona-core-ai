@@ -14,6 +14,13 @@ def launch_training():
         "--output_dir", "/content/drive/MyDrive/Omega_20M_Final/checkpoints"
     ])
 
+def launch_sft_training():
+    subprocess.Popen([
+        "python", "sft_trainer.py",
+        "--data_file", "/content/drive/MyDrive/AI LMM TRAININGSDATEN DATA SET DRIN/phase2_coding_instruct.jsonl",
+        "--output_dir", "/content/drive/MyDrive/Omega_20M_Final/checkpoints"
+    ])
+
 def get_latest_metrics():
     log_dir = "/content/drive/MyDrive/Omega_20M_Final/checkpoints/logs"
     if not os.path.exists(log_dir):
@@ -52,9 +59,13 @@ def get_latest_metrics():
 
     return step, loss, lr, tps
 
-def chat_inference(message, history):
+def chat_inference(message, history, mode):
     # Call the generate.py script to load the latest weights and generate a response
     checkpoint_dir = "/content/drive/MyDrive/Omega_20M_Final/checkpoints"
+
+    prompt = message
+    if mode == "Instruct Mode":
+        prompt = f"Instruction: {message}\nInput: \nOutput: "
 
     if not os.path.exists(checkpoint_dir):
         return "Model has not saved any checkpoints yet. Please wait for training."
@@ -63,7 +74,7 @@ def chat_inference(message, history):
         result = subprocess.run([
             "python", "generate.py",
             "--checkpoint_dir", checkpoint_dir,
-            "--prompt", message,
+            "--prompt", prompt,
             "--max_new_tokens", "50"
         ], capture_output=True, text=True)
 
@@ -72,8 +83,8 @@ def chat_inference(message, history):
         if "--- Generated Text ---" in output:
             generated_text = output.split("--- Generated Text ---")[1].split("----------------------")[0].strip()
             # Remove the prompt from the generated text if it's there
-            if generated_text.startswith(message):
-                generated_text = generated_text[len(message):].strip()
+            if generated_text.startswith(prompt):
+                generated_text = generated_text[len(prompt):].strip()
             return generated_text
         else:
             return "Error generating response: " + output + "\n" + result.stderr
@@ -92,8 +103,11 @@ with gr.Blocks(title="Omega 20M TPU Pre-training Dashboard") as demo:
             lr_text = gr.Textbox(label="Learning Rate", value="N/A", interactive=False)
             tps_text = gr.Textbox(label="Tokens/second", value="N/A", interactive=False)
 
-            start_btn = gr.Button("Start Training Background Thread", variant="primary")
+            start_btn = gr.Button("Start Pre-Training Background Thread", variant="primary")
             start_btn.click(fn=launch_training)
+
+            sft_btn = gr.Button("Start Phase 2 SFT Thread", variant="secondary")
+            sft_btn.click(fn=launch_sft_training)
 
             # Auto-refresh metrics every 5 seconds
             demo.load(
@@ -106,7 +120,13 @@ with gr.Blocks(title="Omega 20M TPU Pre-training Dashboard") as demo:
         with gr.Column(scale=2):
             gr.Markdown("## Live Evaluation Chat")
             gr.Markdown("*Chat with the most recently saved checkpoint from `/content/drive/MyDrive/Omega_20M_Final/checkpoints`.*")
-            chatbot = gr.ChatInterface(fn=chat_inference)
+
+            mode_radio = gr.Radio(["Pre-training Mode", "Instruct Mode"], value="Pre-training Mode", label="Inference Mode")
+
+            chatbot = gr.ChatInterface(
+                fn=chat_inference,
+                additional_inputs=[mode_radio]
+            )
 
 if __name__ == "__main__":
     demo.launch(share=True, inline=True)
