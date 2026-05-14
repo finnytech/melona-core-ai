@@ -9,10 +9,13 @@ class LlamaRMSNorm(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        weight = self.param('weight', nn.initializers.ones, (self.config.hidden_size,))
-        variance = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-        x = x * jax.lax.rsqrt(variance + self.config.rms_norm_eps)
-        return weight * x
+        weight = self.param('weight', nn.initializers.ones, (self.config.hidden_size,), self.config.dtype)
+        # RMSNorm should be computed in fp32 for stability
+        x_fp32 = x.astype(jnp.float32)
+        variance = jnp.mean(jnp.square(x_fp32), axis=-1, keepdims=True)
+        x_normed = x_fp32 * jax.lax.rsqrt(variance + self.config.rms_norm_eps)
+        x_normed = x_normed.astype(x.dtype)
+        return weight * x_normed
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs = 1.0 / (theta ** (jnp.arange(0, dim, 2)[: (dim // 2)].astype(jnp.float32) / dim))
@@ -47,10 +50,10 @@ class LlamaAttention(nn.Module):
         self.head_dim = self.config.hidden_size // self.num_heads
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
 
-        self.q_proj = nn.Dense(self.num_heads * self.head_dim, use_bias=False)
-        self.k_proj = nn.Dense(self.num_kv_heads * self.head_dim, use_bias=False)
-        self.v_proj = nn.Dense(self.num_kv_heads * self.head_dim, use_bias=False)
-        self.o_proj = nn.Dense(self.config.hidden_size, use_bias=False)
+        self.q_proj = nn.Dense(self.num_heads * self.head_dim, use_bias=False, dtype=self.config.dtype, param_dtype=self.config.dtype)
+        self.k_proj = nn.Dense(self.num_kv_heads * self.head_dim, use_bias=False, dtype=self.config.dtype, param_dtype=self.config.dtype)
+        self.v_proj = nn.Dense(self.num_kv_heads * self.head_dim, use_bias=False, dtype=self.config.dtype, param_dtype=self.config.dtype)
+        self.o_proj = nn.Dense(self.config.hidden_size, use_bias=False, dtype=self.config.dtype, param_dtype=self.config.dtype)
 
     def __call__(self, hidden_states, freqs_cis, attention_mask=None):
         batch_size, seq_length, _ = hidden_states.shape
@@ -77,9 +80,10 @@ class LlamaAttention(nn.Module):
         scores = jnp.matmul(q, jnp.transpose(k, (0, 1, 3, 2))) / jnp.sqrt(self.head_dim)
         if attention_mask is not None:
             # attention_mask is typically (batch, 1, seq_len, seq_len)
-            scores = scores + attention_mask
+            scores = scores + attention_mask.astype(scores.dtype)
 
-        attn_weights = jax.nn.softmax(scores, axis=-1)
+        # Softmax in fp32 for numerical stability
+        attn_weights = jax.nn.softmax(scores.astype(jnp.float32), axis=-1).astype(scores.dtype)
         output = jnp.matmul(attn_weights, v)
 
         output = jnp.transpose(output, (0, 2, 1, 3))
@@ -91,9 +95,9 @@ class LlamaMLP(nn.Module):
     config: LlamaConfig
 
     def setup(self):
-        self.gate_proj = nn.Dense(self.config.intermediate_size, use_bias=False)
-        self.up_proj = nn.Dense(self.config.intermediate_size, use_bias=False)
-        self.down_proj = nn.Dense(self.config.hidden_size, use_bias=False)
+        self.gate_proj = nn.Dense(self.config.intermediate_size, use_bias=False, dtype=self.config.dtype, param_dtype=self.config.dtype)
+        self.up_proj = nn.Dense(self.config.intermediate_size, use_bias=False, dtype=self.config.dtype, param_dtype=self.config.dtype)
+        self.down_proj = nn.Dense(self.config.hidden_size, use_bias=False, dtype=self.config.dtype, param_dtype=self.config.dtype)
 
     def __call__(self, x):
         return self.down_proj(nn.silu(self.gate_proj(x)) * self.up_proj(x))
@@ -124,7 +128,7 @@ class LlamaModel(nn.Module):
     config: LlamaConfig
 
     def setup(self):
-        self.embed_tokens = nn.Embed(self.config.vocab_size, self.config.hidden_size)
+        self.embed_tokens = nn.Embed(self.config.vocab_size, self.config.hidden_size, dtype=self.config.dtype, param_dtype=self.config.dtype)
         self.layers = [LlamaDecoderLayer(self.config, name=f"layers.{i}") for i in range(self.config.num_hidden_layers)]
         self.norm = LlamaRMSNorm(self.config)
 
@@ -151,7 +155,7 @@ class LlamaForCausalLM(nn.Module):
 
     def setup(self):
         self.model = LlamaModel(self.config)
-        self.lm_head = nn.Dense(self.config.vocab_size, use_bias=False)
+        self.lm_head = nn.Dense(self.config.vocab_size, use_bias=False, dtype=self.config.dtype, param_dtype=self.config.dtype)
 
     def __call__(self, input_ids, attention_mask=None):
         hidden_states = self.model(input_ids, attention_mask)

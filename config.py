@@ -1,9 +1,12 @@
 from dataclasses import dataclass
+from typing import Any
+import jax.numpy as jnp
 
 @dataclass
 class LlamaConfig:
     # Maximize the hidden dimensions for 47GB VRAM (TPU v5e) without OOM
     vocab_size: int = 50000 # Typical German BPE size
+    dtype: Any = jnp.bfloat16 # Explicitly set bfloat16 for VRAM efficiency
     hidden_size: int = 3072
     intermediate_size: int = 8192  # usually multiple of 256
     num_hidden_layers: int = 32
