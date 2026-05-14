@@ -17,12 +17,17 @@ def generate(model_apply_fn, params, input_ids, config, max_new_tokens=50, tempe
     """
     seq_len = input_ids.shape[1]
 
+    # Compile the forward pass to avoid XLA memory fragmentation
+    @jax.jit
+    def _forward(params_inner, input_ids_inner):
+        return model_apply_fn({'params': params_inner}, input_ids_inner)
+
     # We do a naive JAX generation loop using a Python while loop
     # In a real library, use jax.lax.while_loop with KV cache
 
     for _ in range(max_new_tokens):
         # Forward pass
-        logits = model_apply_fn({'params': params}, input_ids)
+        logits = _forward(params, input_ids)
         next_token_logits = logits[:, -1, :]
 
         # Temperature

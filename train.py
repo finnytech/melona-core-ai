@@ -8,6 +8,7 @@ import flax
 from flax.training import train_state
 import orbax.checkpoint
 import psutil
+import gc
 from torch.utils.tensorboard import SummaryWriter
 
 from config import LlamaConfig
@@ -61,7 +62,7 @@ def loss_fn(params, apply_fn, batch):
 
     return loss
 
-@jax.jit
+@jax.jit(donate_argnums=(0,))
 def train_step(state, batch):
     grad_fn = jax.value_and_grad(loss_fn)
     loss, grads = grad_fn(state.params, state.apply_fn, batch)
@@ -159,7 +160,7 @@ def main(args_list=None):
     # Since prompt requested jax.pmap or shard_map, we'll use flax.jax_utils.replicate for pmap
     if num_devices > 1:
         state = flax.jax_utils.replicate(state)
-        p_train_step = jax.pmap(p_train_step_fn, axis_name='batch')
+        p_train_step = jax.pmap(p_train_step_fn, axis_name='batch', donate_argnums=(0,))
     else:
         p_train_step = train_step
 
@@ -192,6 +193,9 @@ def main(args_list=None):
 
             # Update global state for hot-reloading
             global_state = flax.jax_utils.unreplicate(state) if num_devices > 1 else state
+
+            # Clear stale XLA arrays
+            gc.collect()
 
             # Logging
             tokens_in_batch = global_batch_size * config.max_position_embeddings
