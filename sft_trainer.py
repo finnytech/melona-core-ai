@@ -61,17 +61,25 @@ def get_sft_dataloader(data_file: str, tokenizer_path: str, batch_size: int, seq
         batch_input_ids = []
         batch_loss_mask = []
 
-        for item in tokenized_dataset:
-            batch_input_ids.append(item['input_ids'])
-            batch_loss_mask.append(item['loss_mask'])
+        iterator = iter(tokenized_dataset)
+        while True:
+            try:
+                item = next(iterator)
+                batch_input_ids.append(item['input_ids'])
+                batch_loss_mask.append(item['loss_mask'])
 
-            if len(batch_input_ids) == batch_size:
-                yield {
-                    "input_ids": jnp.array(batch_input_ids, dtype=jnp.int32),
-                    "loss_mask": jnp.array(batch_loss_mask, dtype=jnp.float32)
-                }
-                batch_input_ids = []
-                batch_loss_mask = []
+                if len(batch_input_ids) == batch_size:
+                    yield {
+                        "input_ids": jnp.array(batch_input_ids, dtype=jnp.int32),
+                        "loss_mask": jnp.array(batch_loss_mask, dtype=jnp.float32)
+                    }
+                    batch_input_ids = []
+                    batch_loss_mask = []
+            except StopIteration:
+                break
+            except Exception as e:
+                print(f"Skipping corrupted SFT data line due to error: {e}")
+                continue
 
     return get_batch_iterator()
 
@@ -88,6 +96,9 @@ def sft_loss_fn(params, apply_fn, batch):
 
     logits = apply_fn({'params': params}, inputs)
 
+    # Cast logits to fp32 to prevent NaNs
+    logits = logits.astype(jnp.float32)
+
     # Cross entropy loss
     vocab_size = logits.shape[-1]
     targets_one_hot = jax.nn.one_hot(targets, vocab_size)
@@ -102,6 +113,14 @@ def sft_loss_fn(params, apply_fn, batch):
 def sft_train_step(state, batch):
     grad_fn = jax.value_and_grad(sft_loss_fn)
     loss, grads = grad_fn(state.params, state.apply_fn, batch)
+    state = state.apply_gradients(grads=grads)
+    return state, loss
+
+def p_sft_train_step_fn(state, batch):
+    grad_fn = jax.value_and_grad(sft_loss_fn)
+    loss, grads = grad_fn(state.params, state.apply_fn, batch)
+    grads = jax.lax.pmean(grads, axis_name='batch')
+    loss = jax.lax.pmean(loss, axis_name='batch')
     state = state.apply_gradients(grads=grads)
     return state, loss
 
@@ -171,7 +190,7 @@ def main():
 
     if num_devices > 1:
         state = flax.jax_utils.replicate(state)
-        p_train_step = jax.pmap(sft_train_step, axis_name='batch')
+        p_train_step = jax.pmap(p_sft_train_step_fn, axis_name='batch')
     else:
         p_train_step = sft_train_step
 

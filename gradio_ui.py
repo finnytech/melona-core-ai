@@ -6,20 +6,37 @@ import os
 import glob
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
+training_process = None
+
+def stop_training():
+    global training_process
+    if training_process is not None:
+        training_process.terminate()
+        training_process.wait()
+        training_process = None
+        return "Training process terminated."
+    return "No training process running."
+
 def launch_training():
+    global training_process
+    stop_training()
     # Launches the training script as a subprocess so it doesn't block the UI
-    subprocess.Popen([
+    training_process = subprocess.Popen([
         "python", "train.py",
         "--data_dir", "/content/drive/MyDrive/Omega_20M_Final",
         "--output_dir", "/content/drive/MyDrive/Omega_20M_Final/checkpoints"
     ])
+    return "Pre-Training Background Thread Started!"
 
 def launch_sft_training():
-    subprocess.Popen([
+    global training_process
+    stop_training()
+    training_process = subprocess.Popen([
         "python", "sft_trainer.py",
         "--data_file", "/content/drive/MyDrive/AI LMM TRAININGSDATEN DATA SET DRIN/phase2_coding_instruct.jsonl",
         "--output_dir", "/content/drive/MyDrive/Omega_20M_Final/checkpoints"
     ])
+    return "Phase 2 SFT Background Thread Started!"
 
 def get_latest_metrics():
     log_dir = "/content/drive/MyDrive/Omega_20M_Final/checkpoints/logs"
@@ -32,7 +49,7 @@ def get_latest_metrics():
 
     latest_event_file = max(event_files, key=os.path.getctime)
 
-    ea = EventAccumulator(latest_event_file)
+    ea = EventAccumulator(latest_event_file, size_guidance={'scalars': 1})
     ea.Reload()
 
     step = "N/A"
@@ -103,11 +120,16 @@ with gr.Blocks(title="Omega 20M TPU Pre-training Dashboard") as demo:
             lr_text = gr.Textbox(label="Learning Rate", value="N/A", interactive=False)
             tps_text = gr.Textbox(label="Tokens/second", value="N/A", interactive=False)
 
+            status_text = gr.Textbox(label="Process Status", value="Idle", interactive=False)
+
             start_btn = gr.Button("Start Pre-Training Background Thread", variant="primary")
-            start_btn.click(fn=launch_training)
+            start_btn.click(fn=launch_training, outputs=status_text)
 
             sft_btn = gr.Button("Start Phase 2 SFT Thread", variant="secondary")
-            sft_btn.click(fn=launch_sft_training)
+            sft_btn.click(fn=launch_sft_training, outputs=status_text)
+
+            stop_btn = gr.Button("Stop All Training", variant="stop")
+            stop_btn.click(fn=stop_training, outputs=status_text)
 
             # Auto-refresh metrics every 5 seconds
             demo.load(

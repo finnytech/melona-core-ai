@@ -46,6 +46,9 @@ def loss_fn(params, apply_fn, batch):
 
     logits = apply_fn({'params': params}, inputs)
 
+    # Cast logits to fp32 to prevent NaNs in cross entropy
+    logits = logits.astype(jnp.float32)
+
     # Cross entropy loss
     vocab_size = logits.shape[-1]
     targets_one_hot = jax.nn.one_hot(targets, vocab_size)
@@ -61,6 +64,14 @@ def loss_fn(params, apply_fn, batch):
 def train_step(state, batch):
     grad_fn = jax.value_and_grad(loss_fn)
     loss, grads = grad_fn(state.params, state.apply_fn, batch)
+    state = state.apply_gradients(grads=grads)
+    return state, loss
+
+def p_train_step_fn(state, batch):
+    grad_fn = jax.value_and_grad(loss_fn)
+    loss, grads = grad_fn(state.params, state.apply_fn, batch)
+    grads = jax.lax.pmean(grads, axis_name='batch')
+    loss = jax.lax.pmean(loss, axis_name='batch')
     state = state.apply_gradients(grads=grads)
     return state, loss
 
@@ -129,7 +140,7 @@ def main():
     # Since prompt requested jax.pmap or shard_map, we'll use flax.jax_utils.replicate for pmap
     if num_devices > 1:
         state = flax.jax_utils.replicate(state)
-        p_train_step = jax.pmap(train_step, axis_name='batch')
+        p_train_step = jax.pmap(p_train_step_fn, axis_name='batch')
     else:
         p_train_step = train_step
 
