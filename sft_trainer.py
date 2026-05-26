@@ -98,7 +98,7 @@ def sft_loss_fn(params, apply_fn, batch):
     # Shift loss mask. The target token's loss is masked by the loss_mask corresponding to the target's position
     mask = loss_mask[:, 1:]
 
-    logits = apply_fn({'params': params}, inputs)
+    logits, aux_loss = apply_fn({'params': params}, inputs)
 
     # Cast logits to fp32 to prevent NaNs
     logits = logits.astype(jnp.float32)
@@ -106,10 +106,13 @@ def sft_loss_fn(params, apply_fn, batch):
     # Cross entropy loss
     vocab_size = logits.shape[-1]
     targets_one_hot = jax.nn.one_hot(targets, vocab_size)
-    loss = optax.softmax_cross_entropy(logits=logits, labels=targets_one_hot)
+    ce_loss = optax.softmax_cross_entropy(logits=logits, labels=targets_one_hot)
 
     # Apply Prompt Masking
-    loss = (loss * mask).sum() / jnp.maximum(mask.sum(), 1e-5)
+    ce_loss = (ce_loss * mask).sum() / jnp.maximum(mask.sum(), 1e-5)
+
+    # Combine SFT Cross Entropy Loss with Auxiliary Load Balancing Loss for MoE routing
+    loss = ce_loss + 0.01 * aux_loss
 
     return loss
 

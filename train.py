@@ -46,7 +46,7 @@ def loss_fn(params, apply_fn, batch):
     inputs = input_ids[:, :-1]
     targets = input_ids[:, 1:]
 
-    logits = apply_fn({'params': params}, inputs)
+    logits, aux_loss = apply_fn({'params': params}, inputs)
 
     # Cast logits to fp32 to prevent NaNs in cross entropy
     logits = logits.astype(jnp.float32)
@@ -54,11 +54,14 @@ def loss_fn(params, apply_fn, batch):
     # Cross entropy loss
     vocab_size = logits.shape[-1]
     targets_one_hot = jax.nn.one_hot(targets, vocab_size)
-    loss = optax.softmax_cross_entropy(logits=logits, labels=targets_one_hot)
+    ce_loss = optax.softmax_cross_entropy(logits=logits, labels=targets_one_hot)
 
     # Mask padding if necessary. Assuming we padded with 0.
     mask = (targets != 0)
-    loss = (loss * mask).sum() / mask.sum()
+    ce_loss = (ce_loss * mask).sum() / mask.sum()
+
+    # Combine Cross Entropy Loss with Auxiliary Load Balancing Loss for MoE routing
+    loss = ce_loss + 0.01 * aux_loss
 
     return loss
 

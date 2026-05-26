@@ -96,6 +96,8 @@ def chat_inference(message, history, mode):
     prompt = message
     if mode == "Instruct Mode":
         prompt = f"Instruction: {message}\nInput: \nOutput: "
+    elif mode == "System 2 (Self-Correction)":
+        prompt = f"User: {message}\n<thought>\n"
 
     try:
         # Prevent memory fragmentation by forcing GC before allocating new chat buffers
@@ -150,6 +152,16 @@ def chat_inference(message, history, mode):
         generated_text = tokenizer.decode(np.array(output_ids[0]), skip_special_tokens=True)
         if generated_text.startswith(prompt):
             generated_text = generated_text[len(prompt):].strip()
+
+        if mode == "System 2 (Self-Correction)":
+            if "</thought>" in generated_text:
+                thought, response = generated_text.split("</thought>", 1)
+                formatted_response = f"<details><summary><b>🧠 Thought Process</b></summary>\n\n{thought.strip()}\n</details>\n\n{response.strip()}"
+                return formatted_response
+            else:
+                formatted_response = f"<details><summary><b>🧠 Thought Process (Incomplete)</b></summary>\n\n{generated_text.strip()}\n</details>\n\n*Model did not complete the thought process.*"
+                return formatted_response
+
         return generated_text
 
     except Exception as e:
@@ -186,7 +198,7 @@ with gr.Blocks(title="Omega 20M TPU Pre-training Dashboard") as demo:
             gr.Markdown("## Live Evaluation Chat")
             gr.Markdown("*Chat with the most recently saved checkpoint from `/content/drive/MyDrive/Omega_20M_Final/checkpoints`.*")
 
-            mode_radio = gr.Radio(["Pre-training Mode", "Instruct Mode"], value="Pre-training Mode", label="Inference Mode")
+            mode_radio = gr.Radio(["Pre-training Mode", "Instruct Mode", "System 2 (Self-Correction)"], value="Pre-training Mode", label="Inference Mode")
 
             chatbot = gr.ChatInterface(
                 fn=chat_inference,

@@ -20,7 +20,8 @@ def generate(model_apply_fn, params, input_ids, config, max_new_tokens=50, tempe
     # Compile the forward pass to avoid XLA memory fragmentation
     @jax.jit
     def _forward(params_inner, input_ids_inner):
-        return model_apply_fn({'params': params_inner}, input_ids_inner)
+        logits, aux_loss = model_apply_fn({'params': params_inner}, input_ids_inner)
+        return logits
 
     # We do a naive JAX generation loop using a Python while loop
     # In a real library, use jax.lax.while_loop with KV cache
