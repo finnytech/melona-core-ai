@@ -61,32 +61,34 @@ def get_dataloader(
 
     # Convert to JAX arrays and batch
     def get_batch_iterator():
-        batch_input_ids = []
-        batch_attention_mask = []
+        while True:  # Infinite Continuous Learning Loop
+            batch_input_ids = []
+            batch_attention_mask = []
 
-        # Use an explicit iterator to catch bad lines gracefully
-        iterator = iter(chunked_dataset)
-        while True:
-            try:
-                item = next(iterator)
-                batch_input_ids.append(item['input_ids'])
-                if 'attention_mask' in item:
-                    batch_attention_mask.append(item['attention_mask'])
-                else:
-                    batch_attention_mask.append([1] * len(item['input_ids']))
+            # Use an explicit iterator to catch bad lines gracefully
+            iterator = iter(chunked_dataset)
+            while True:
+                try:
+                    item = next(iterator)
+                    batch_input_ids.append(item['input_ids'])
+                    if 'attention_mask' in item:
+                        batch_attention_mask.append(item['attention_mask'])
+                    else:
+                        batch_attention_mask.append([1] * len(item['input_ids']))
 
-                if len(batch_input_ids) == batch_size:
-                    yield {
-                        "input_ids": jnp.array(batch_input_ids, dtype=jnp.int32),
-                        "attention_mask": jnp.array(batch_attention_mask, dtype=jnp.int32)
-                    }
-                    batch_input_ids = []
-                    batch_attention_mask = []
-            except StopIteration:
-                break
-            except Exception as e:
-                # Catch JSONDecodeError or other corruption and skip the line
-                print(f"Skipping corrupted data line due to error: {e}")
-                continue
+                    if len(batch_input_ids) == batch_size:
+                        yield {
+                            "input_ids": jnp.array(batch_input_ids, dtype=jnp.int32),
+                            "attention_mask": jnp.array(batch_attention_mask, dtype=jnp.int32)
+                        }
+                        batch_input_ids = []
+                        batch_attention_mask = []
+                except StopIteration:
+                    print("Dataset exhausted, looping back to the beginning for infinite learning.")
+                    break # Break inner loop to restart the outer while True loop
+                except Exception as e:
+                    # Catch JSONDecodeError or other corruption and skip the line
+                    print(f"Skipping corrupted data line due to error: {e}")
+                    continue
 
     return get_batch_iterator()

@@ -172,8 +172,7 @@ def main(args_list=None):
 
     try:
         for batch in dataloader:
-            if step >= args.max_steps:
-                break
+            # Removed `if step >= args.max_steps: break` for Infinite Continuous Learning
 
             # If multi-device, reshape batch to (num_devices, batch_size_per_device, ...)
             try:
