@@ -12,9 +12,13 @@ class LlamaConfig:
     num_hidden_layers: int = 32
     num_attention_heads: int = 32
     num_key_value_heads: int = 8 # GQA
-    max_position_embeddings: int = 8192
+    max_position_embeddings: int = 100000 # Long-Context Explosion
     rms_norm_eps: float = 1e-5
     rope_theta: float = 10000.0
+
+    # MoE Config
+    num_experts: int = 4
+    num_experts_per_tok: int = 2
     initializer_range: float = 0.02
     use_cache: bool = True
     bos_token_id: int = 1

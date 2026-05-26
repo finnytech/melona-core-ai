@@ -24,7 +24,12 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs_cis = jnp.exp(1j * freqs)
     return freqs_cis
 
-def apply_rotary_emb(xq, xk, freqs_cis):
+def apply_rotary_emb(xq, xk, freqs_cis, position_ids=None, max_position_embeddings=8192):
+    # YaRN / Linear Scaling for Long Context
+    if position_ids is not None:
+        scaling_factor = jnp.maximum(1.0, position_ids / max_position_embeddings)
+        freqs_cis = freqs_cis / scaling_factor[..., None]
+
     xq_ = xq[..., 0::2] + 1j * xq[..., 1::2]
     xk_ = xk[..., 0::2] + 1j * xk[..., 1::2]
 
@@ -102,16 +107,71 @@ class LlamaMLP(nn.Module):
     def __call__(self, x):
         return self.down_proj(nn.silu(self.gate_proj(x)) * self.up_proj(x))
 
+class LlamaMoE(nn.Module):
+    config: LlamaConfig
+
+    def setup(self):
+        self.num_experts = self.config.num_experts
+        self.num_experts_per_tok = self.config.num_experts_per_tok
+
+        self.gate = nn.Dense(self.num_experts, use_bias=False, dtype=self.config.dtype, param_dtype=self.config.dtype)
+        self.experts = [LlamaMLP(self.config, name=f"expert_{i}") for i in range(self.num_experts)]
+
+    def __call__(self, hidden_states):
+        batch_size, seq_len, hidden_dim = hidden_states.shape
+        hidden_states_flat = hidden_states.reshape(-1, hidden_dim)
+
+        router_logits = self.gate(hidden_states_flat)
+        routing_weights = jax.nn.softmax(router_logits.astype(jnp.float32), axis=-1)
+
+        # Top-K routing
+        routing_weights, selected_experts = jax.lax.top_k(routing_weights, self.num_experts_per_tok)
+        routing_weights = routing_weights / jnp.sum(routing_weights, axis=-1, keepdims=True)
+        routing_weights = routing_weights.astype(self.config.dtype)
+
+        # Load balancing loss computation
+        expert_mask = jax.nn.one_hot(selected_experts, self.num_experts).sum(axis=-2)
+        tokens_per_expert = expert_mask.mean(axis=0)
+        router_prob_per_expert = jax.nn.softmax(router_logits.astype(jnp.float32), axis=-1).mean(axis=0)
+        aux_loss = jnp.sum(tokens_per_expert * router_prob_per_expert) * self.num_experts
+
+        final_hidden_states = jnp.zeros_like(hidden_states_flat)
+
+        # Dispatch to experts
+        for i, expert in enumerate(self.experts):
+            expert_mask_i = (selected_experts == i)
+            # Find tokens assigned to this expert
+            token_indices = jnp.any(expert_mask_i, axis=-1)
+
+            if jnp.any(token_indices):
+                expert_inputs = hidden_states_flat[token_indices]
+                expert_outputs = expert(expert_inputs)
+
+                # Extract routing weights for this expert
+                expert_weights = jnp.sum(jnp.where(expert_mask_i, routing_weights, 0.0), axis=-1, keepdims=True)
+                expert_weights_subset = expert_weights[token_indices]
+
+                weighted_outputs = expert_outputs * expert_weights_subset
+
+                # A proper scatter operation is needed in JAX
+                # Since dynamic masking inside a jit without padding is tricky, we use jnp.where
+                full_expert_outputs = jnp.zeros_like(hidden_states_flat)
+                full_expert_outputs = full_expert_outputs.at[token_indices].set(weighted_outputs)
+                final_hidden_states = final_hidden_states + full_expert_outputs
+
+        final_hidden_states = final_hidden_states.reshape(batch_size, seq_len, hidden_dim)
+        return final_hidden_states, aux_loss
+
 class LlamaDecoderLayer(nn.Module):
     config: LlamaConfig
 
     def setup(self):
         self.self_attn = LlamaAttention(self.config)
-        self.mlp = LlamaMLP(self.config)
+        self.moe = LlamaMoE(self.config)
         self.input_layernorm = LlamaRMSNorm(self.config)
         self.post_attention_layernorm = LlamaRMSNorm(self.config)
 
-    def __call__(self, hidden_states, freqs_cis, attention_mask=None):
+    def __call__(self, hidden_states, freqs_cis, attention_mask=None, position_ids=None):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(hidden_states, freqs_cis, attention_mask)
@@ -119,10 +179,12 @@ class LlamaDecoderLayer(nn.Module):
 
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+
+        hidden_states, aux_loss = self.moe(hidden_states)
+
         hidden_states = residual + hidden_states
 
-        return hidden_states
+        return hidden_states, aux_loss
 
 class LlamaModel(nn.Module):
     config: LlamaConfig
@@ -136,6 +198,7 @@ class LlamaModel(nn.Module):
         batch_size, seq_length = input_ids.shape
         hidden_states = self.embed_tokens(input_ids)
 
+        position_ids = jnp.arange(seq_length)[None, :]
         freqs_cis = precompute_freqs_cis(self.config.hidden_size // self.config.num_attention_heads, seq_length, self.config.rope_theta)
 
         if attention_mask is None:
@@ -144,11 +207,13 @@ class LlamaModel(nn.Module):
             mask = jnp.where(mask == 0, -1e9, 0.0)
             attention_mask = mask.reshape(1, 1, seq_length, seq_length)
 
+        total_aux_loss = 0.0
         for layer in self.layers:
-            hidden_states = layer(hidden_states, freqs_cis, attention_mask)
+            hidden_states, aux_loss = layer(hidden_states, freqs_cis, attention_mask, position_ids)
+            total_aux_loss += aux_loss
 
         hidden_states = self.norm(hidden_states)
-        return hidden_states
+        return hidden_states, total_aux_loss
 
 class LlamaForCausalLM(nn.Module):
     config: LlamaConfig
@@ -158,6 +223,6 @@ class LlamaForCausalLM(nn.Module):
         self.lm_head = nn.Dense(self.config.vocab_size, use_bias=False, dtype=self.config.dtype, param_dtype=self.config.dtype)
 
     def __call__(self, input_ids, attention_mask=None):
-        hidden_states = self.model(input_ids, attention_mask)
+        hidden_states, aux_loss = self.model(input_ids, attention_mask)
         logits = self.lm_head(hidden_states)
-        return logits
+        return logits, aux_loss
