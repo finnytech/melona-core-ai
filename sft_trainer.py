@@ -60,28 +60,30 @@ def get_sft_dataloader(data_file: str, tokenizer_path: str, batch_size: int, seq
     tokenized_dataset = dataset.map(process_and_tokenize, remove_columns=list(dataset.features.keys()) if dataset.features else None)
 
     def get_batch_iterator():
-        batch_input_ids = []
-        batch_loss_mask = []
+        while True: # Infinite Continuous Learning Loop
+            batch_input_ids = []
+            batch_loss_mask = []
 
-        iterator = iter(tokenized_dataset)
-        while True:
-            try:
-                item = next(iterator)
-                batch_input_ids.append(item['input_ids'])
-                batch_loss_mask.append(item['loss_mask'])
+            iterator = iter(tokenized_dataset)
+            while True:
+                try:
+                    item = next(iterator)
+                    batch_input_ids.append(item['input_ids'])
+                    batch_loss_mask.append(item['loss_mask'])
 
-                if len(batch_input_ids) == batch_size:
-                    yield {
-                        "input_ids": jnp.array(batch_input_ids, dtype=jnp.int32),
-                        "loss_mask": jnp.array(batch_loss_mask, dtype=jnp.float32)
-                    }
-                    batch_input_ids = []
-                    batch_loss_mask = []
-            except StopIteration:
-                break
-            except Exception as e:
-                print(f"Skipping corrupted SFT data line due to error: {e}")
-                continue
+                    if len(batch_input_ids) == batch_size:
+                        yield {
+                            "input_ids": jnp.array(batch_input_ids, dtype=jnp.int32),
+                            "loss_mask": jnp.array(batch_loss_mask, dtype=jnp.float32)
+                        }
+                        batch_input_ids = []
+                        batch_loss_mask = []
+                except StopIteration:
+                    print("SFT Dataset exhausted, looping back to the beginning for infinite learning.")
+                    break
+                except Exception as e:
+                    print(f"Skipping corrupted SFT data line due to error: {e}")
+                    continue
 
     return get_batch_iterator()
 
@@ -217,8 +219,7 @@ def main(args_list=None):
     step = start_step
 
     for batch in dataloader:
-        if step >= args.max_steps:
-            break
+        # Removed `if step >= args.max_steps: break` for Infinite Continuous Learning
 
         try:
             if num_devices > 1:
