@@ -36,7 +36,7 @@ def run_train():
     train.main(["--data_dir", "/content/drive/MyDrive/Omega_20M_Final", "--output_dir", "/content/drive/MyDrive/Omega_20M_Final/checkpoints"])
 
 def run_sft_train():
-    sft_trainer.main(["--data_file", "/content/drive/MyDrive/AI LMM TRAININGSDATEN DATA SET DRIN/phase2_coding_instruct.jsonl", "--output_dir", "/content/drive/MyDrive/Omega_20M_Final/checkpoints"])
+    sft_trainer.main(["--data_file", "/content/drive/MyDrive/Omega_20M_Final/knowledge_data.jsonl", "--output_dir", "/content/drive/MyDrive/Omega_20M_Final/checkpoints"])
 
 def launch_training():
     global training_thread
