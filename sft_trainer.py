@@ -31,9 +31,18 @@ def get_sft_dataloader(data_file: str, tokenizer_path: str, batch_size: int, seq
         dataset = load_dataset("json", data_files=data_file, streaming=True, split="train")
 
     def process_and_tokenize(example):
-        instruction = example.get("instruction", "")
-        inp = example.get("input", "")
-        output = example.get("output", "")
+        if "question" in example:
+            instruction = "Answer this question."
+            inp = example.get("question", "")
+            output = example.get("text", "")
+        elif "concept" in example:
+            instruction = "Define this concept."
+            inp = example.get("concept", "")
+            output = example.get("text", "")
+        else:
+            instruction = example.get("instruction", "")
+            inp = example.get("input", "")
+            output = example.get("output", "")
 
         prompt = f"Instruction: {instruction}\nInput: {inp}\nOutput: "
         full_text = prompt + output + tokenizer.eos_token
@@ -155,7 +164,7 @@ def main(args_list=None):
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.85"
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_file', type=str, default='/content/drive/MyDrive/AI LMM TRAININGSDATEN DATA SET DRIN/phase2_coding_instruct.jsonl')
+    parser.add_argument('--data_file', type=str, default='/content/drive/MyDrive/Omega_20M_Final/knowledge_data.jsonl')
     parser.add_argument('--output_dir', type=str, default='/content/drive/MyDrive/Omega_20M_Final/checkpoints')
     parser.add_argument('--tokenizer_path', type=str, default='tokenizer.json')
     parser.add_argument('--batch_size', type=int, default=4)
