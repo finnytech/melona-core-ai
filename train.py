@@ -105,6 +105,20 @@ def p_train_step_fn(state, batch):
 # Global state for hot-reloading in the UI
 global_state = None
 
+def get_gpu_vram():
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, check=True
+        )
+        vrams = [int(x) for x in result.stdout.strip().split("\n") if x.strip().isdigit()]
+        if vrams:
+            return min(vrams)
+    except Exception:
+        pass
+    return None
+
 def main(args_list=None):
     global global_state
 
@@ -124,16 +138,29 @@ def main(args_list=None):
     parser.add_argument('--save_interval_secs', type=int, default=1200, help='Time interval in seconds between checkpoint saves (default: 1200s / 20 mins)')
     args = parser.parse_args(args_list)
 
-    # Dynamic Batch Sizing based on available memory
+    # Dynamic Batch Sizing based on available GPU VRAM
     try:
-        mem = psutil.virtual_memory()
-        # Scale batch size roughly based on available RAM (this is a simplified heuristic)
-        if mem.available > 30 * 1024**3: # >30GB RAM
-            args.batch_size = max(args.batch_size, 16)
-        elif mem.available > 15 * 1024**3: # >15GB RAM
-            args.batch_size = max(args.batch_size, 8)
+        gpu_vram_mb = get_gpu_vram()
+        if gpu_vram_mb:
+            print(f"Detected GPU with {gpu_vram_mb} MB VRAM.")
+            # Scale batch size based on VRAM (for our ~520M model)
+            if gpu_vram_mb >= 20000: # e.g. L4/A10G (24GB) or A100 (40GB/80GB)
+                args.batch_size = max(args.batch_size, 32)
+            elif gpu_vram_mb >= 14000: # e.g. T4 (16GB)
+                args.batch_size = max(args.batch_size, 16)
+            else: # Small GPUs
+                args.batch_size = max(args.batch_size, 8)
+            print(f"Dynamic batch size scaled to {args.batch_size} per device based on GPU VRAM.")
         else:
-            args.batch_size = max(args.batch_size, 4)
+            # Fallback to system RAM scaling if no GPU is found
+            mem = psutil.virtual_memory()
+            if mem.available > 30 * 1024**3:
+                args.batch_size = max(args.batch_size, 16)
+            elif mem.available > 15 * 1024**3:
+                args.batch_size = max(args.batch_size, 8)
+            else:
+                args.batch_size = max(args.batch_size, 4)
+            print(f"No GPU detected by nvidia-smi. Dynamic batch size set to {args.batch_size} based on system RAM.")
     except Exception as e:
         print(f"Warning: Could not dynamically scale batch size: {e}")
 
