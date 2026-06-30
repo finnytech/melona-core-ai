@@ -162,7 +162,7 @@ def main(args_list=None):
     num_devices = jax.device_count()
     global_batch_size = args.batch_size * num_devices
 
-    print(f"Running on {num_devices} devices.")
+    print(f"Running on {num_devices} devices: {jax.devices()}")
     print(f"Global batch size: {global_batch_size}")
 
     # Setup Dataloader

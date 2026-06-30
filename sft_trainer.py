@@ -239,6 +239,7 @@ def main(args_list=None):
 
     num_devices = jax.device_count()
     global_batch_size = args.batch_size * num_devices
+    print(f"Running SFT on {num_devices} devices: {jax.devices()}")
 
     dataloader = get_sft_dataloader(
         data_file=args.data_file,
