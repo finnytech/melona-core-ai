@@ -2,6 +2,7 @@ import argparse
 import os
 import time
 import jax
+import subprocess
 import jax.numpy as jnp
 import optax
 import flax
@@ -172,6 +173,8 @@ def main(args_list=None):
     parser.add_argument('--warmup_steps', type=int, default=500)
     parser.add_argument('--peak_lr', type=float, default=2e-5) # lower for SFT
     parser.add_argument('--save_every', type=int, default=1000)
+    parser.add_argument('--model_bucket', type=str, default=None, help='GCS bucket path for syncing checkpoints (e.g. finny-tech-ai-storage/finny-tech-ai-models)')
+    parser.add_argument('--save_interval_secs', type=int, default=1200, help='Time interval in seconds between checkpoint saves (default: 1200s / 20 mins)')
     args = parser.parse_args(args_list)
 
     # Dynamic Batch Sizing based on available memory
@@ -206,6 +209,42 @@ def main(args_list=None):
     lr_schedule = create_learning_rate_schedule(args.max_steps, args.warmup_steps, args.peak_lr)
     state = create_sft_train_state(init_rng, config, lr_schedule)
 
+    # Auto-restore from GCS bucket if local directory doesn't have checkpoints
+    if args.model_bucket:
+        try:
+            print(f"Checking GCS bucket gs://{args.model_bucket} for existing checkpoints...")
+            result = subprocess.run(["gsutil", "ls", f"gs://{args.model_bucket}"], capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout:
+                # Find all step numbers (GCS outputs them like gs://bucket/models/1000/)
+                lines = result.stdout.strip().split("\n")
+                steps = []
+                for line in lines:
+                    line = line.rstrip("/")
+                    parts = line.split("/")
+                    if parts[-1].isdigit():
+                        steps.append(int(parts[-1]))
+                
+                if steps:
+                    latest_gcs_step = max(steps)
+                    print(f"Found latest checkpoint in GCS at step {latest_gcs_step}.")
+                    local_step_dir = os.path.join(args.output_dir, str(latest_gcs_step))
+                    if not os.path.exists(local_step_dir):
+                        print(f"Downloading checkpoint for step {latest_gcs_step} from GCS to {args.output_dir}...")
+                        os.makedirs(args.output_dir, exist_ok=True)
+                        dl_result = subprocess.run([
+                            "gsutil", "-m", "cp", "-r", 
+                            f"gs://{args.model_bucket}/{latest_gcs_step}", 
+                            args.output_dir
+                        ], capture_output=True, text=True)
+                        if dl_result.returncode == 0:
+                            print(f"Successfully downloaded checkpoint {latest_gcs_step} from GCS.")
+                        else:
+                            print(f"Warning: Failed to download checkpoint: {dl_result.stderr}")
+                    else:
+                        print(f"Latest GCS checkpoint {latest_gcs_step} is already present locally.")
+        except Exception as e:
+            print(f"Warning: Failed to check or download GCS checkpoints: {e}")
+
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=3, create=True)
     checkpoint_manager = orbax.checkpoint.CheckpointManager(
@@ -214,7 +253,7 @@ def main(args_list=None):
 
     start_step = 0
     if checkpoint_manager.latest_step() is not None:
-        print(f"Restoring from pre-training checkpoint at step {checkpoint_manager.latest_step()}...")
+        print(f"Restoring from checkpoint at step {checkpoint_manager.latest_step()}...")
         restored = checkpoint_manager.restore(checkpoint_manager.latest_step())
         # We restore params, but keep the new SFT optimizer state (which starts fresh)
         state = state.replace(params=restored['params'])
@@ -229,41 +268,70 @@ def main(args_list=None):
 
     print("Starting SFT training...")
     step = start_step
+    last_save_time = time.time()
 
-    for batch in dataloader:
-        # Removed `if step >= args.max_steps: break` for Infinite Continuous Learning
+    try:
+        for batch in dataloader:
+            # Removed `if step >= args.max_steps: break` for Infinite Continuous Learning
 
-        try:
-            if num_devices > 1:
-                batch = {k: v.reshape((num_devices, args.batch_size) + v.shape[1:]) for k, v in batch.items()}
+            try:
+                if num_devices > 1:
+                    batch = {k: v.reshape((num_devices, args.batch_size) + v.shape[1:]) for k, v in batch.items()}
 
-            batch = jax.device_put(batch)
-            state, loss = p_train_step(state, batch)
+                batch = jax.device_put(batch)
+                state, loss = p_train_step(state, batch)
 
-            if num_devices > 1:
-                loss = jnp.mean(loss)
-        except Exception as e:
-            print(f"SFT Training step failed. Error: {e}")
-            continue
+                if num_devices > 1:
+                    loss = jnp.mean(loss)
+            except Exception as e:
+                print(f"SFT Training step failed. Error: {e}")
+                continue
 
-        global_state = flax.jax_utils.unreplicate(state) if num_devices > 1 else state
+            global_state = flax.jax_utils.unreplicate(state) if num_devices > 1 else state
 
-        # Clear stale XLA arrays
-        gc.collect()
+            # Clear stale XLA arrays
+            gc.collect()
 
-        if step % 10 == 0:
-            current_lr = lr_schedule(step)
-            print(f"SFT Step {step} | Loss: {loss:.4f} | LR: {current_lr:.2e}")
-            writer.add_scalar("SFT/Loss", loss, step)
-            writer.add_scalar("SFT/LearningRate", current_lr, step)
+            if step % 10 == 0:
+                current_lr = lr_schedule(step)
+                print(f"SFT Step {step} | Loss: {loss:.4f} | LR: {current_lr:.2e}")
+                writer.add_scalar("SFT/Loss", loss, step)
+                writer.add_scalar("SFT/LearningRate", current_lr, step)
 
-        if step % args.save_every == 0 and step > start_step:
-            save_state = flax.jax_utils.unreplicate(state) if num_devices > 1 else state
-            # Save sft_step to track progress
-            checkpoint_manager.save(step, {'step': save_state.step, 'sft_step': step, 'params': save_state.params, 'opt_state': save_state.opt_state})
-            print(f"Saved SFT checkpoint at step {step}")
+            time_to_save = (time.time() - last_save_time) >= args.save_interval_secs
+            step_to_save = (step % args.save_every == 0 and step > start_step)
 
-        step += 1
+            if step_to_save or time_to_save:
+                save_state = flax.jax_utils.unreplicate(state) if num_devices > 1 else state
+                checkpoint_manager.save(step, {'step': save_state.step, 'sft_step': step, 'params': save_state.params, 'opt_state': save_state.opt_state})
+                print(f"Saved SFT checkpoint at step {step}")
+                last_save_time = time.time()
+
+                if args.model_bucket:
+                    print(f"Syncing SFT checkpoint {step} to GCS bucket gs://{args.model_bucket} ...")
+                    import threading
+                    def upload_task(step_to_upload):
+                        try:
+                            cmd = ["gsutil", "-m", "cp", "-r", os.path.join(args.output_dir, str(step_to_upload)), f"gs://{args.model_bucket}/"]
+                            res = subprocess.run(cmd, capture_output=True, text=True)
+                            if res.returncode == 0:
+                                print(f"SUCCESS: Uploaded checkpoint {step_to_upload} to GCS.")
+                            else:
+                                print(f"Warning: Failed to upload checkpoint to GCS: {res.stderr}")
+                        except Exception as upload_err:
+                            print(f"Error during GCS checkpoint upload: {upload_err}")
+
+                    threading.Thread(target=upload_task, args=(step,), daemon=True).start()
+
+            step += 1
+
+    except KeyboardInterrupt:
+        print("SFT Training interrupted manually. Saving final checkpoint...")
+        save_state = flax.jax_utils.unreplicate(state) if num_devices > 1 else state
+        checkpoint_manager.save(step, {'step': save_state.step, 'sft_step': step, 'params': save_state.params, 'opt_state': save_state.opt_state})
+        if args.model_bucket:
+            print(f"Syncing final SFT checkpoint {step} to GCS bucket gs://{args.model_bucket} ...")
+            subprocess.run(["gsutil", "-m", "cp", "-r", os.path.join(args.output_dir, str(step)), f"gs://{args.model_bucket}/"])
 
     writer.close()
     print("SFT finished.")
