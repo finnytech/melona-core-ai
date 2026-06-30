@@ -207,6 +207,19 @@ def get_gpu_vram():
 def main(args_list=None):
     global global_state
 
+    # Optimize CPU core utilization for data loading, BLAS, and tokenizer preprocessing
+    try:
+        import psutil
+        physical_cores = psutil.cpu_count(logical=False) or 4
+        os.environ["OMP_NUM_THREADS"] = str(physical_cores)
+        os.environ["MKL_NUM_THREADS"] = str(physical_cores)
+        os.environ["OPENBLAS_NUM_THREADS"] = str(physical_cores)
+        os.environ["NUMEXPR_NUM_THREADS"] = str(physical_cores)
+        os.environ["TOKENIZERS_PARALLELISM"] = "true"
+        print(f"Optimized CPU thread pools: Using {physical_cores} physical cores for preprocessing and dataloading.")
+    except Exception as cpu_err:
+        print(f"Warning: Could not optimize CPU threads: {cpu_err}")
+
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.85"
 
     parser = argparse.ArgumentParser()
