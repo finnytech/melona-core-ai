@@ -4,15 +4,15 @@ import jax.numpy as jnp
 
 @dataclass
 class LlamaConfig:
-    # Maximize the hidden dimensions for 47GB VRAM (TPU v5e) without OOM
+    # Optimized hidden dimensions for 1x/2x NVIDIA L4 GPUs (24GB VRAM each) to run extremely fast without OOM
     vocab_size: int = 50000 # Typical German BPE size
     dtype: Any = jnp.bfloat16 # Explicitly set bfloat16 for VRAM efficiency
-    hidden_size: int = 3072
-    intermediate_size: int = 8192  # usually multiple of 256
-    num_hidden_layers: int = 32
-    num_attention_heads: int = 32
-    num_key_value_heads: int = 8 # GQA
-    max_position_embeddings: int = 100000 # Long-Context Explosion
+    hidden_size: int = 1024
+    intermediate_size: int = 2048  # usually multiple of 256
+    num_hidden_layers: int = 16
+    num_attention_heads: int = 16
+    num_key_value_heads: int = 4 # GQA
+    max_position_embeddings: int = 4096 # Perfect context length for SFT Q&A
     rms_norm_eps: float = 1e-5
     rope_theta: float = 10000.0
 
