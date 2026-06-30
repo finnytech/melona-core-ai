@@ -41,7 +41,7 @@ def get_dataloader(
         text_column = 'text' if 'text' in examples else list(examples.keys())[0]
         return tokenizer(examples[text_column])
 
-    tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=list(dataset.features.keys()) if dataset.features else None)
+    tokenized_dataset = dataset.map(tokenize_function, batched=True)
 
     # Group texts into chunks of `seq_length`
     def group_texts(examples):

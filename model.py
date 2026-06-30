@@ -60,7 +60,7 @@ class LlamaAttention(nn.Module):
         self.v_proj = nn.Dense(self.num_kv_heads * self.head_dim, use_bias=False, dtype=self.config.dtype, param_dtype=self.config.dtype)
         self.o_proj = nn.Dense(self.config.hidden_size, use_bias=False, dtype=self.config.dtype, param_dtype=self.config.dtype)
 
-    def __call__(self, hidden_states, freqs_cis, attention_mask=None):
+    def __call__(self, hidden_states, freqs_cis, attention_mask=None, position_ids=None):
         batch_size, seq_length, _ = hidden_states.shape
 
         q = self.q_proj(hidden_states)
@@ -71,7 +71,7 @@ class LlamaAttention(nn.Module):
         k = k.reshape(batch_size, seq_length, self.num_kv_heads, self.head_dim)
         v = v.reshape(batch_size, seq_length, self.num_kv_heads, self.head_dim)
 
-        q, k = apply_rotary_emb(q, k, freqs_cis)
+        q, k = apply_rotary_emb(q, k, freqs_cis, position_ids=position_ids, max_position_embeddings=self.config.max_position_embeddings)
 
         # GQA: repeat K, V
         if self.num_key_value_groups > 1:
@@ -137,27 +137,18 @@ class LlamaMoE(nn.Module):
 
         final_hidden_states = jnp.zeros_like(hidden_states_flat)
 
-        # Dispatch to experts
+        # Dispatch to experts in a static, JIT-friendly way
         for i, expert in enumerate(self.experts):
             expert_mask_i = (selected_experts == i)
-            # Find tokens assigned to this expert
-            token_indices = jnp.any(expert_mask_i, axis=-1)
-
-            if jnp.any(token_indices):
-                expert_inputs = hidden_states_flat[token_indices]
-                expert_outputs = expert(expert_inputs)
-
-                # Extract routing weights for this expert
-                expert_weights = jnp.sum(jnp.where(expert_mask_i, routing_weights, 0.0), axis=-1, keepdims=True)
-                expert_weights_subset = expert_weights[token_indices]
-
-                weighted_outputs = expert_outputs * expert_weights_subset
-
-                # A proper scatter operation is needed in JAX
-                # Since dynamic masking inside a jit without padding is tricky, we use jnp.where
-                full_expert_outputs = jnp.zeros_like(hidden_states_flat)
-                full_expert_outputs = full_expert_outputs.at[token_indices].set(weighted_outputs)
-                final_hidden_states = final_hidden_states + full_expert_outputs
+            # Extract routing weights for this expert: shape (num_tokens, 1)
+            expert_weights = jnp.sum(jnp.where(expert_mask_i, routing_weights, 0.0), axis=-1, keepdims=True)
+            
+            # Compute expert output for all tokens statically
+            expert_outputs = expert(hidden_states_flat)
+            
+            # Mask out the output for tokens that are not routed to this expert
+            weighted_outputs = expert_outputs * expert_weights
+            final_hidden_states = final_hidden_states + weighted_outputs
 
         final_hidden_states = final_hidden_states.reshape(batch_size, seq_len, hidden_dim)
         return final_hidden_states, aux_loss
@@ -174,7 +165,7 @@ class LlamaDecoderLayer(nn.Module):
     def __call__(self, hidden_states, freqs_cis, attention_mask=None, position_ids=None):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(hidden_states, freqs_cis, attention_mask)
+        hidden_states = self.self_attn(hidden_states, freqs_cis, attention_mask, position_ids=position_ids)
         hidden_states = residual + hidden_states
 
         residual = hidden_states

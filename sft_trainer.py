@@ -66,7 +66,7 @@ def get_sft_dataloader(data_file: str, tokenizer_path: str, batch_size: int, seq
             "loss_mask": loss_mask
         }
 
-    tokenized_dataset = dataset.map(process_and_tokenize, remove_columns=list(dataset.features.keys()) if dataset.features else None)
+    tokenized_dataset = dataset.map(process_and_tokenize)
 
     def get_batch_iterator():
         while True: # Infinite Continuous Learning Loop
