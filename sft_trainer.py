@@ -17,6 +17,27 @@ from config import LlamaConfig
 from model import LlamaForCausalLM
 from train import TrainState, create_learning_rate_schedule
 
+def export_to_safetensors(params, output_path):
+    try:
+        from safetensors.flax import save_file
+        
+        def flatten_dict(d, parent_key='', sep='.'):
+            items = []
+            for k, v in d.items():
+                new_key = f"{parent_key}{sep}{k}" if parent_key else k
+                if isinstance(v, dict) or isinstance(v, flax.core.FrozenDict):
+                    items.extend(flatten_dict(v, new_key, sep=sep).items())
+                else:
+                    items.append((new_key, v))
+            return dict(items)
+            
+        flat_params = flatten_dict(flax.core.unfreeze(params))
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        save_file(flat_params, output_path)
+        print(f"Exported model weights to safetensors: {output_path}")
+    except Exception as e:
+        print(f"Warning: Failed to export model to safetensors: {e}")
+
 def get_sft_dataloader(data_file: str, tokenizer_path: str, batch_size: int, seq_length: int):
     if os.path.exists(tokenizer_path):
         tokenizer = PreTrainedTokenizerFast(tokenizer_file=tokenizer_path)
@@ -24,12 +45,22 @@ def get_sft_dataloader(data_file: str, tokenizer_path: str, batch_size: int, seq
         tokenizer = AutoTokenizer.from_pretrained("gpt2")
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Handle case where directory might not exist yet during testing
-    if not os.path.exists(data_file):
-        print(f"Warning: Data file {data_file} not found. Using dummy dataset.")
+    # Find files: if data_file is a directory, glob all jsonl files in it
+    import glob
+    if os.path.isdir(data_file):
+        data_files = glob.glob(os.path.join(data_file, "**/*.jsonl"), recursive=True)
+    elif os.path.exists(data_file):
+        data_files = [data_file]
+    else:
+        # Check if we can glob it directly (in case of wildcard strings)
+        data_files = glob.glob(data_file)
+        
+    if not data_files:
+        print(f"Warning: No training files found for path {data_file}. Using dummy dataset.")
         dataset = load_dataset("json", text='{"instruction": "dummy", "input": "dummy", "output": "dummy"}', split="train", streaming=True)
     else:
-        dataset = load_dataset("json", data_files=data_file, streaming=True, split="train")
+        print(f"Loading SFT dataset from {len(data_files)} files: {data_files[:5]}...")
+        dataset = load_dataset("json", data_files=data_files, streaming=True, split="train")
 
     def process_and_tokenize(example):
         if "question" in example:
@@ -189,6 +220,19 @@ def main(args_list=None):
     except Exception as e:
         print(f"Warning: Could not dynamically scale batch size: {e}")
 
+    # Download SFT training dataset from GCS if it is a gs:// path
+    if args.data_file.startswith("gs://"):
+        try:
+            print(f"Downloading SFT training dataset shards from GCS: {args.data_file} ...")
+            local_data_dir = "./local_sft_data"
+            os.makedirs(local_data_dir, exist_ok=True)
+            # Sync GCS files to local directory
+            subprocess.run(["gsutil", "-m", "cp", args.data_file, local_data_dir], check=True)
+            args.data_file = local_data_dir
+            print(f"Successfully downloaded training data to {local_data_dir}")
+        except Exception as e:
+            print(f"Error downloading training data from GCS: {e}")
+
     os.makedirs(args.output_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=os.path.join(args.output_dir, 'logs_sft'))
     config = LlamaConfig()
@@ -305,10 +349,15 @@ def main(args_list=None):
                 save_state = flax.jax_utils.unreplicate(state) if num_devices > 1 else state
                 checkpoint_manager.save(step, {'step': save_state.step, 'sft_step': step, 'params': save_state.params, 'opt_state': save_state.opt_state})
                 print(f"Saved SFT checkpoint at step {step}")
+                
+                # Export weights as safetensors inside the step directory
+                safetensors_path = os.path.join(args.output_dir, str(step), "model.safetensors")
+                export_to_safetensors(save_state.params, safetensors_path)
+                
                 last_save_time = time.time()
 
                 if args.model_bucket:
-                    print(f"Syncing SFT checkpoint {step} to GCS bucket gs://{args.model_bucket} ...")
+                    print(f"Syncing SFT checkpoint {step} (including safetensors) to GCS bucket gs://{args.model_bucket} ...")
                     import threading
                     def upload_task(step_to_upload):
                         try:
@@ -329,8 +378,13 @@ def main(args_list=None):
         print("SFT Training interrupted manually. Saving final checkpoint...")
         save_state = flax.jax_utils.unreplicate(state) if num_devices > 1 else state
         checkpoint_manager.save(step, {'step': save_state.step, 'sft_step': step, 'params': save_state.params, 'opt_state': save_state.opt_state})
+        
+        # Export final weights to safetensors
+        safetensors_path = os.path.join(args.output_dir, str(step), "model.safetensors")
+        export_to_safetensors(save_state.params, safetensors_path)
+        
         if args.model_bucket:
-            print(f"Syncing final SFT checkpoint {step} to GCS bucket gs://{args.model_bucket} ...")
+            print(f"Syncing final SFT checkpoint {step} (including safetensors) to GCS bucket gs://{args.model_bucket} ...")
             subprocess.run(["gsutil", "-m", "cp", "-r", os.path.join(args.output_dir, str(step)), f"gs://{args.model_bucket}/"])
 
     writer.close()

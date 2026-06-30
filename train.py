@@ -19,6 +19,27 @@ from dataloader import get_dataloader
 class TrainState(train_state.TrainState):
     pass
 
+def export_to_safetensors(params, output_path):
+    try:
+        from safetensors.flax import save_file
+        
+        def flatten_dict(d, parent_key='', sep='.'):
+            items = []
+            for k, v in d.items():
+                new_key = f"{parent_key}{sep}{k}" if parent_key else k
+                if isinstance(v, dict) or isinstance(v, flax.core.FrozenDict):
+                    items.extend(flatten_dict(v, new_key, sep=sep).items())
+                else:
+                    items.append((new_key, v))
+            return dict(items)
+            
+        flat_params = flatten_dict(flax.core.unfreeze(params))
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        save_file(flat_params, output_path)
+        print(f"Exported model weights to safetensors: {output_path}")
+    except Exception as e:
+        print(f"Warning: Failed to export model to safetensors: {e}")
+
 def create_learning_rate_schedule(total_steps, warmup_steps, peak_lr):
     def schedule(step):
         warmup_lr = peak_lr * (step / warmup_steps)
@@ -115,6 +136,18 @@ def main(args_list=None):
             args.batch_size = max(args.batch_size, 4)
     except Exception as e:
         print(f"Warning: Could not dynamically scale batch size: {e}")
+
+    # Download training data from GCS if it is a gs:// path
+    if args.data_dir.startswith("gs://"):
+        try:
+            print(f"Downloading pre-training dataset shards from GCS: {args.data_dir} ...")
+            local_data_dir = "./local_pretrain_data"
+            os.makedirs(local_data_dir, exist_ok=True)
+            subprocess.run(["gsutil", "-m", "cp", args.data_dir, local_data_dir], check=True)
+            args.data_dir = local_data_dir
+            print(f"Successfully downloaded training data to {local_data_dir}")
+        except Exception as e:
+            print(f"Error downloading training data from GCS: {e}")
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -269,10 +302,15 @@ def main(args_list=None):
                 save_state = flax.jax_utils.unreplicate(state) if num_devices > 1 else state
                 checkpoint_manager.save(step, {'step': save_state.step, 'params': save_state.params, 'opt_state': save_state.opt_state})
                 print(f"Saved checkpoint at step {step}")
+                
+                # Export weights as safetensors inside the step directory
+                safetensors_path = os.path.join(args.output_dir, str(step), "model.safetensors")
+                export_to_safetensors(save_state.params, safetensors_path)
+                
                 last_save_time = time.time()
 
                 if args.model_bucket:
-                    print(f"Syncing checkpoint {step} to GCS bucket gs://{args.model_bucket} ...")
+                    print(f"Syncing checkpoint {step} (including safetensors) to GCS bucket gs://{args.model_bucket} ...")
                     import threading
                     def upload_task(step_to_upload):
                         try:
@@ -293,8 +331,13 @@ def main(args_list=None):
         print("Training interrupted manually. Saving checkpoint...")
         save_state = flax.jax_utils.unreplicate(state) if num_devices > 1 else state
         checkpoint_manager.save(step, {'step': save_state.step, 'params': save_state.params, 'opt_state': save_state.opt_state})
+        
+        # Export final weights to safetensors
+        safetensors_path = os.path.join(args.output_dir, str(step), "model.safetensors")
+        export_to_safetensors(save_state.params, safetensors_path)
+        
         if args.model_bucket:
-            print(f"Syncing final checkpoint {step} to GCS bucket gs://{args.model_bucket} ...")
+            print(f"Syncing final checkpoint {step} (including safetensors) to GCS bucket gs://{args.model_bucket} ...")
             subprocess.run(["gsutil", "-m", "cp", "-r", os.path.join(args.output_dir, str(step)), f"gs://{args.model_bucket}/"])
 
     writer.close()
