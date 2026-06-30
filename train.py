@@ -180,10 +180,14 @@ def main(args_list=None):
     # Download training data from GCS if it is a gs:// path
     if args.data_dir.startswith("gs://"):
         try:
-            print(f"Downloading pre-training dataset shards from GCS: {args.data_dir} ...")
+            gcs_path = args.data_dir
+            if not gcs_path.endswith("*") and not gcs_path.endswith(".jsonl"):
+                gcs_path = gcs_path.rstrip("/") + "/*"
+                
+            print(f"Downloading pre-training dataset shards from GCS: {gcs_path} ...")
             local_data_dir = "./local_pretrain_data"
             os.makedirs(local_data_dir, exist_ok=True)
-            subprocess.run(["gsutil", "-m", "cp", args.data_dir, local_data_dir], check=True)
+            subprocess.run(["gsutil", "-m", "cp", gcs_path, local_data_dir], check=True)
             args.data_dir = local_data_dir
             print(f"Successfully downloaded training data to {local_data_dir}")
         except Exception as e:

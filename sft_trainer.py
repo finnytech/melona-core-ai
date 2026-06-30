@@ -264,11 +264,15 @@ def main(args_list=None):
     # Download SFT training dataset from GCS if it is a gs:// path
     if args.data_file.startswith("gs://"):
         try:
-            print(f"Downloading SFT training dataset shards from GCS: {args.data_file} ...")
+            gcs_path = args.data_file
+            if not gcs_path.endswith("*") and not gcs_path.endswith(".jsonl"):
+                gcs_path = gcs_path.rstrip("/") + "/*"
+                
+            print(f"Downloading SFT training dataset shards from GCS: {gcs_path} ...")
             local_data_dir = "./local_sft_data"
             os.makedirs(local_data_dir, exist_ok=True)
             # Sync GCS files to local directory
-            subprocess.run(["gsutil", "-m", "cp", args.data_file, local_data_dir], check=True)
+            subprocess.run(["gsutil", "-m", "cp", gcs_path, local_data_dir], check=True)
             args.data_file = local_data_dir
             print(f"Successfully downloaded training data to {local_data_dir}")
         except Exception as e:
